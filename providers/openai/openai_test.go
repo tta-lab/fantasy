@@ -4022,8 +4022,9 @@ func TestResponsesToPrompt_ReasoningWithStore(t *testing.T) {
 		input, warnings := toResponsesPrompt(prompt, "system", true)
 		require.Empty(t, warnings)
 
-		// With store=true: user, assistant text (reasoning
-		// skipped), follow-up user.
+		// With store=true the API already holds reasoning items
+		// server-side, so replay is redundant. Expect: user, assistant
+		// text, follow-up user (3 items, no reasoning).
 		require.Len(t, input, 3)
 
 		// Verify no reasoning item leaked through.
@@ -4033,18 +4034,58 @@ func TestResponsesToPrompt_ReasoningWithStore(t *testing.T) {
 		}
 	})
 
-	t.Run("store false skips reasoning", func(t *testing.T) {
+	t.Run("store false replays reasoning with encrypted content", func(t *testing.T) {
 		t.Parallel()
 
 		input, warnings := toResponsesPrompt(prompt, "system", false)
 		require.Empty(t, warnings)
 
-		// With store=false: user, assistant text, follow-up user.
-		require.Len(t, input, 3)
+		// With store=false the encrypted_content blob is the only way to
+		// preserve reasoning continuity across requests. Expect: user,
+		// reasoning (replayed), assistant text, follow-up user.
+		require.Len(t, input, 4)
 
+		require.NotNil(t, input[1].OfReasoning,
+			"reasoning item must be replayed when store=false and encrypted_content is present")
+		require.Equal(t, reasoningItemID, input[1].OfReasoning.ID)
+		require.True(t, input[1].OfReasoning.EncryptedContent.Valid())
+		require.Equal(t, encryptedContent, input[1].OfReasoning.EncryptedContent.Value)
+	})
+
+	t.Run("store false skips reasoning when encrypted content missing", func(t *testing.T) {
+		t.Parallel()
+
+		// Strip encrypted_content from the reasoning metadata. Without
+		// the blob, the inline item has no server-addressable state, so
+		// it must be skipped to avoid an "Item not found" error.
+		strippedPrompt := fantasy.Prompt{
+			prompt[0],
+			{
+				Role: fantasy.MessageRoleAssistant,
+				Content: []fantasy.MessagePart{
+					fantasy.ReasoningPart{
+						Text: "Let me think about this...",
+						ProviderOptions: fantasy.ProviderOptions{
+							Name: &ResponsesReasoningMetadata{
+								ItemID:           reasoningItemID,
+								EncryptedContent: nil,
+								Summary:          []string{},
+							},
+						},
+					},
+					fantasy.TextPart{Text: "4"},
+				},
+			},
+			prompt[2],
+		}
+
+		input, warnings := toResponsesPrompt(strippedPrompt, "system", false)
+		require.Empty(t, warnings)
+
+		require.Len(t, input, 3)
 		for _, item := range input {
 			require.Nil(t, item.OfReasoning,
-				"reasoning items must not appear when store=false")
+				"reasoning items without encrypted_content must be skipped")
 		}
 	})
 }

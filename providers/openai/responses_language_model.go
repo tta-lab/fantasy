@@ -565,13 +565,47 @@ func toResponsesPrompt(prompt fantasy.Prompt, systemMessageMode string, store bo
 					// recognised Responses API input type; skip.
 					continue
 				case fantasy.ContentTypeReasoning:
-					// Reasoning items are always skipped during replay.
-					// When store is enabled, the API already has them
-					// persisted server-side. When store is disabled, the
-					// item IDs are ephemeral and referencing them causes
-					// "Item not found" errors. In both cases, replaying
-					// reasoning inline is not supported by the API.
-					continue
+					// Replay reasoning items only when:
+					//   1. store is disabled (server holds nothing, so we must
+					//      send the encrypted blob ourselves to maintain
+					//      reasoning continuity), AND
+					//   2. we have an encrypted_content blob from a prior turn
+					//      (requested via include=reasoning.encrypted_content).
+					// The blob is the opaque server-side state that lets the
+					// model continue reasoning across requests. When store=true
+					// the API already holds the items server-side and replay
+					// would be redundant; skip in that case (matches the
+					// previous-only behavior). When store=false but no encrypted
+					// content was captured, an inline reasoning item is not
+					// addressable by the API, so skip.
+					if store {
+						continue
+					}
+					reasoningPart, ok := fantasy.AsContentType[fantasy.ReasoningPart](c)
+					if !ok {
+						warnings = append(warnings, fantasy.CallWarning{
+							Type:    fantasy.CallWarningTypeOther,
+							Message: "assistant message reasoning part does not have the right type",
+						})
+						continue
+					}
+					meta := GetReasoningMetadata(reasoningPart.ProviderOptions)
+					if meta == nil || meta.EncryptedContent == nil || *meta.EncryptedContent == "" || meta.ItemID == "" {
+						// Nothing to replay (no encrypted_content captured, or
+						// the model didn't emit a server-addressable item id).
+						continue
+					}
+
+					summaries := make([]responses.ResponseReasoningItemSummaryParam, 0, len(meta.Summary))
+					for _, text := range meta.Summary {
+						summaries = append(summaries, responses.ResponseReasoningItemSummaryParam{Text: text})
+					}
+					reasoningItem := responses.ResponseReasoningItemParam{
+						ID:               meta.ItemID,
+						Summary:          summaries,
+						EncryptedContent: param.NewOpt(*meta.EncryptedContent),
+					}
+					input = append(input, responses.ResponseInputItemUnionParam{OfReasoning: &reasoningItem})
 				}
 			}
 
