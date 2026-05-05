@@ -1127,6 +1127,19 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 				case "reasoning":
 					state := activeReasoning[done.Item.ID]
 					if state != nil {
+						// The output_item.done event carries the FINAL
+						// encrypted_content blob for the reasoning item.
+						// The earlier output_item.added event for reasoning
+						// items typically does not include it (the item is
+						// still being generated). Capture it here so the
+						// blob is available for replay on subsequent turns
+						// (see also: ContentTypeReasoning case in
+						// toResponsesPrompt). Without this, encrypted_content
+						// is silently dropped and reasoning continuity is
+						// lost across requests when store=false.
+						if done.Item.EncryptedContent != "" {
+							state.metadata.EncryptedContent = &done.Item.EncryptedContent
+						}
 						if !yield(fantasy.StreamPart{
 							Type: fantasy.StreamPartTypeReasoningEnd,
 							ID:   done.Item.ID,
