@@ -1257,47 +1257,6 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 				finishReason = mapResponsesFinishReason(completed.Response.IncompleteDetails.Reason, hasFunctionCall)
 				usage = responsesUsage(completed.Response)
 
-				// Streaming events (output_item.added/done) do not always
-				// carry the full encrypted_content for reasoning items —
-				// the API only guarantees encrypted_content in the FINAL
-				// completed.Response.Output[]. The non-streaming Generate()
-				// path already reads from this final Output[] and captures
-				// it correctly. Bring the streaming path into parity by
-				// walking Output[] here and emitting a finalisation
-				// ReasoningEnd for each reasoning item. The consumer
-				// (which calls SetReasoningResponsesData on every
-				// ReasoningEnd) will overwrite any incomplete metadata
-				// captured from the earlier stream events with the
-				// authoritative final blob. Without this, multi-turn
-				// reasoning continuity silently degrades on subsequent
-				// turns because the encrypted blob is lost.
-				for _, outputItem := range completed.Response.Output {
-					if outputItem.Type != "reasoning" {
-						continue
-					}
-					if outputItem.EncryptedContent == "" && len(outputItem.Summary) == 0 {
-						continue
-					}
-					metadata := &ResponsesReasoningMetadata{
-						ItemID: outputItem.ID,
-					}
-					if outputItem.EncryptedContent != "" {
-						metadata.EncryptedContent = &outputItem.EncryptedContent
-					}
-					for _, s := range outputItem.Summary {
-						metadata.Summary = append(metadata.Summary, s.Text)
-					}
-					if !yield(fantasy.StreamPart{
-						Type: fantasy.StreamPartTypeReasoningEnd,
-						ID:   outputItem.ID,
-						ProviderMetadata: fantasy.ProviderMetadata{
-							Name: metadata,
-						},
-					}) {
-						return
-					}
-				}
-
 			case "response.incomplete":
 				incomplete := event.AsResponseIncomplete()
 				responseID = incomplete.Response.ID
@@ -1652,11 +1611,6 @@ func (o responsesLanguageModel) streamObjectWithJSONMode(ctx context.Context, ca
 				responseID = completed.Response.ID
 				finishReason = mapResponsesFinishReason(completed.Response.IncompleteDetails.Reason, hasFunctionCall)
 				usage = responsesUsage(completed.Response)
-				// Note: structured-object stream does not currently surface
-				// reasoning items; Stream()'s response.completed handler
-				// re-emits ReasoningEnd from completed.Response.Output[] to
-				// finalise encrypted_content for replay, but ObjectStreamPart
-				// has no reasoning kind, so nothing additional to do here.
 
 			case "response.incomplete":
 				incomplete := event.AsResponseIncomplete()
