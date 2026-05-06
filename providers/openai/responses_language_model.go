@@ -1127,18 +1127,34 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 				case "reasoning":
 					state := activeReasoning[done.Item.ID]
 					if state != nil {
-						// The output_item.done event carries the FINAL
-						// encrypted_content blob for the reasoning item.
-						// The earlier output_item.added event for reasoning
-						// items typically does not include it (the item is
-						// still being generated). Capture it here so the
-						// blob is available for replay on subsequent turns
-						// (see also: ContentTypeReasoning case in
-						// toResponsesPrompt). Without this, encrypted_content
-						// is silently dropped and reasoning continuity is
-						// lost across requests when store=false.
+						// The output_item.done event for reasoning items is
+						// the SOURCE OF TRUTH for the final reasoning state
+						// (matches OpenAI's official codex CLI pattern: see
+						// codex-rs/codex-api/src/sse/responses.rs which
+						// extracts the full ResponseItem here and ignores
+						// response.completed.output, which is known to be
+						// empty for some Codex backend responses — refs
+						// hermes-agent issue #5732).
+						//
+						// Capture every available field so encrypted_content,
+						// summary, and any other surface the API populates is
+						// preserved for replay on subsequent turns (see
+						// ContentTypeReasoning case in toResponsesPrompt for
+						// the replay path).
 						if done.Item.EncryptedContent != "" {
 							state.metadata.EncryptedContent = &done.Item.EncryptedContent
+						}
+						// Pull final Summary from done.Item — the streaming
+						// reasoning_summary_text.delta path may have populated
+						// state.metadata.Summary already, but the done event
+						// carries the authoritative final list. Prefer it
+						// when non-empty.
+						if len(done.Item.Summary) > 0 {
+							finalSummary := make([]string, 0, len(done.Item.Summary))
+							for _, s := range done.Item.Summary {
+								finalSummary = append(finalSummary, s.Text)
+							}
+							state.metadata.Summary = finalSummary
 						}
 						if !yield(fantasy.StreamPart{
 							Type: fantasy.StreamPartTypeReasoningEnd,
@@ -1149,7 +1165,11 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 						}) {
 							return
 						}
-						delete(activeReasoning, done.Item.ID)
+						// Don't delete activeReasoning here — keep it through
+						// response.completed so any stragglers (e.g. items
+						// for which output_item.done never fires) can still be
+						// inspected/finalised. The map is cleared at the end
+						// of the stream when the function returns.
 					}
 				}
 
@@ -1243,6 +1263,33 @@ func (o responsesLanguageModel) Stream(ctx context.Context, call fantasy.Call) (
 						Type:  fantasy.StreamPartTypeReasoningDelta,
 						ID:    textDelta.ItemID,
 						Delta: textDelta.Delta,
+						ProviderMetadata: fantasy.ProviderMetadata{
+							Name: state.metadata,
+						},
+					}) {
+						return
+					}
+				}
+
+			case "response.reasoning_text.delta":
+				// Some Codex backend models (notably gpt-5.x reasoning
+				// variants under certain conditions) stream reasoning via
+				// reasoning_text.delta events instead of (or in addition to)
+				// reasoning_summary_text.delta. Per the official codex CLI
+				// protocol parser (codex-rs/codex-api/src/sse/responses.rs
+				// case "response.reasoning_text.delta"), this event carries
+				// raw reasoning content keyed by ItemID + ContentIndex.
+				//
+				// We surface the delta as a ReasoningDelta to keep consumers
+				// (lenos and similar bash-protocol agents) seeing thinking
+				// text regardless of which event channel the model uses.
+				rawDelta := event.AsResponseReasoningTextDelta()
+				state := activeReasoning[rawDelta.ItemID]
+				if state != nil {
+					if !yield(fantasy.StreamPart{
+						Type:  fantasy.StreamPartTypeReasoningDelta,
+						ID:    rawDelta.ItemID,
+						Delta: rawDelta.Delta,
 						ProviderMetadata: fantasy.ProviderMetadata{
 							Name: state.metadata,
 						},
