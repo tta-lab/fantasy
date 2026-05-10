@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -33,6 +34,14 @@ func toProviderErr(err error) error {
 		parseContextTooLargeError(message, providerErr)
 
 		return providerErr
+	}
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && errors.Is(urlErr.Err, io.EOF) {
+		return &fantasy.ProviderError{
+			Title:   "request transport error",
+			Message: err.Error(),
+			Cause:   err,
+		}
 	}
 	// Wrap in a `ProviderError` so `.IsRetriable()` works.
 	if errors.Is(err, io.ErrUnexpectedEOF) {

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"testing"
 
 	"charm.land/fantasy"
@@ -49,6 +50,29 @@ func TestToProviderErr_PassesThroughUnrelatedErrors(t *testing.T) {
 	got := toProviderErr(err)
 	if got != err {
 		t.Errorf("toProviderErr mutated unrelated error: got %v, want %v", got, err)
+	}
+}
+
+func TestToProviderErr_WrapsPostEOF(t *testing.T) {
+	t.Parallel()
+
+	err := &url.Error{
+		Op:  "Post",
+		URL: "https://chatgpt.com/backend-api/codex/responses",
+		Err: io.EOF,
+	}
+
+	got := toProviderErr(err)
+
+	var providerErr *fantasy.ProviderError
+	if !errors.As(got, &providerErr) {
+		t.Fatalf("toProviderErr did not wrap %v as *fantasy.ProviderError (got %T)", err, got)
+	}
+	if !errors.Is(providerErr.Cause, io.EOF) {
+		t.Errorf("ProviderError.Cause = %v, want chain containing io.EOF", providerErr.Cause)
+	}
+	if !providerErr.IsRetryable() {
+		t.Error("wrapped request EOF must be retryable so retry.go engages")
 	}
 }
 

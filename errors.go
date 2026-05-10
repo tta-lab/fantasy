@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 
@@ -54,13 +55,17 @@ func (m *ProviderError) Error() string {
 }
 
 // IsRetryable reports whether the error should be retried.
-// It returns true if the underlying cause is io.ErrUnexpectedEOF, if the
-// "x-should-retry" response header evaluates to true, or if the HTTP status
-// code indicates a retryable condition (408, 409, 429, or any 5xx).
+// It returns true if the underlying cause is io.ErrUnexpectedEOF, if a request
+// fails with EOF before a response is available, if the "x-should-retry"
+// response header evaluates to true, or if the HTTP status code indicates a
+// retryable condition (408, 409, 429, or any 5xx).
 func (m *ProviderError) IsRetryable() bool {
 	// We're mostly mimicking OpenAI's Go SDK here:
 	// https://github.com/openai/openai-go/blob/b9d280a37149430982e9dfeed16c41d27d45cfc5/internal/requestconfig/requestconfig.go#L244
 	if errors.Is(m.Cause, io.ErrUnexpectedEOF) {
+		return true
+	}
+	if isRequestEOF(m.Cause) {
 		return true
 	}
 	if m.shouldRetryHeader() {
@@ -70,6 +75,28 @@ func (m *ProviderError) IsRetryable() bool {
 		m.StatusCode == http.StatusConflict ||
 		m.StatusCode == http.StatusTooManyRequests ||
 		m.StatusCode >= http.StatusInternalServerError
+}
+
+func isRequestEOF(err error) bool {
+	var urlErr *url.Error
+	if !errors.As(err, &urlErr) || !errors.Is(urlErr.Err, io.EOF) {
+		return false
+	}
+
+	switch strings.ToUpper(urlErr.Op) {
+	case http.MethodConnect,
+		http.MethodDelete,
+		http.MethodGet,
+		http.MethodHead,
+		http.MethodOptions,
+		http.MethodPatch,
+		http.MethodPost,
+		http.MethodPut,
+		http.MethodTrace:
+		return true
+	default:
+		return false
+	}
 }
 
 func (m *ProviderError) shouldRetryHeader() bool {
